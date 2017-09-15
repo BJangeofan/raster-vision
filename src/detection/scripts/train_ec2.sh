@@ -89,6 +89,8 @@ fi
 
 mkdir -p "${LOCAL_TRAIN}/${TRAIN_ID}"
 
+trap "trap - SIGTERM && kill -- -$$" SIGINT SIGTERM EXIT
+
 python models/object_detection/train.py \
     --logtostderr \
     --pipeline_config_path="${CONFIG_PATH}" \
@@ -106,7 +108,6 @@ BACKGROUND_PROCESSES+=($!)
 # https://unix.stackexchange.com/questions/146756/forward-sigterm-to-child-in-bash
 # Kill background processes when killed by Docker (i.e. via the Batch console)
 # or when the last command exits.
-trap "_term" SIGINT SIGTERM EXIT 
 
 # monitor results using tensorboard app
 tensorboard --logdir="${LOCAL_TRAIN}/${TRAIN_ID}"
