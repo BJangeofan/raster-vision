@@ -1,5 +1,15 @@
 #!/bin/bash
 
+function _term(){
+    # Kill any still-living background processes when the script exits
+    set +e
+    for PROCESS in ${BACKGROUND_PROCESSES[*]}
+    do
+        kill -0 "${PROCESS}" >/dev/null 2>&1 && kill -TERM "${PROCESS}"
+    done
+    set -e
+}
+
 # This trains a model on a dataset on EC2.
 
 # Parse args
@@ -48,48 +58,55 @@ LOCAL_TRAIN=/opt/data/results/detection/train
 
 # how often to sync files to the cloud
 SYNC_INTERVAL="10m"
+BACKGROUND_PROCESSES=()
 
 cd /opt/src/detection
 
 # sync results of previous run just in case it crashed in the middle of running
 if [ "$LOCAL" = false ] ; then
-    rm -Rf ${LOCAL_TRAIN}/${TRAIN_ID}
-    aws s3 sync ${S3_TRAIN}/${TRAIN_ID} ${LOCAL_TRAIN}/${TRAIN_ID}
+    rm -Rf "${LOCAL_TRAIN:?}/${TRAIN_ID}"
+    aws s3 sync "${S3_TRAIN}/${TRAIN_ID}" "${LOCAL_TRAIN}/${TRAIN_ID}"
 
     # download pre-trained model (to use as starting point) and unzip
-    aws s3 cp ${S3_DATASETS}/models/${MODEL_ID}.zip ${LOCAL_DATASETS}/models/${MODEL_ID}.zip
-    unzip -o ${LOCAL_DATASETS}/models/${MODEL_ID}.zip -d ${LOCAL_DATASETS}/models/
+    aws s3 cp "${S3_DATASETS}/models/${MODEL_ID}.zip" "${LOCAL_DATASETS}/models/${MODEL_ID}.zip"
+    unzip -o "${LOCAL_DATASETS}/models/${MODEL_ID}.zip" -d "${LOCAL_DATASETS}/models/"
 
     # download training data and unzip
-    aws s3 cp ${S3_DATASETS}/${DATASET_ID}.zip ${LOCAL_DATASETS}/${DATASET_ID}.zip
-    unzip -o ${LOCAL_DATASETS}/${DATASET_ID}.zip -d ${LOCAL_DATASETS}
+    aws s3 cp "${S3_DATASETS}/${DATASET_ID}.zip" "${LOCAL_DATASETS}/${DATASET_ID}.zip"
+    unzip -o "${LOCAL_DATASETS}/${DATASET_ID}.zip" -d "${LOCAL_DATASETS}"
 
     sync_s3() {
         while true
         do
-            aws s3 sync ${LOCAL_TRAIN}/${TRAIN_ID} ${S3_TRAIN}/${TRAIN_ID} --delete
-            sleep ${SYNC_INTERVAL}
+            aws s3 sync "${LOCAL_TRAIN}/${TRAIN_ID}" "${S3_TRAIN}/${TRAIN_ID}" --delete
+            sleep "${SYNC_INTERVAL}"
         done
     }
     sync_s3 &
+    BACKGROUND_PROCESSES+=($!)
+
 fi
 
-mkdir -p ${LOCAL_TRAIN}/${TRAIN_ID}
+mkdir -p "${LOCAL_TRAIN}/${TRAIN_ID}"
 
 python models/object_detection/train.py \
     --logtostderr \
-    --pipeline_config_path=${CONFIG_PATH} \
-    --train_dir=${LOCAL_TRAIN}/${TRAIN_ID}/train &
+    --pipeline_config_path="${CONFIG_PATH}" \
+    --train_dir="${LOCAL_TRAIN}/${TRAIN_ID}/train" &
+BACKGROUND_PROCESSES+=($!)
 
 python models/object_detection/eval.py \
     --logtostderr \
-    --pipeline_config_path=${CONFIG_PATH} \
-    --checkpoint_dir=${LOCAL_TRAIN}/${TRAIN_ID}/train \
-    --eval_dir=${LOCAL_TRAIN}/${TRAIN_ID}/eval &
+    --pipeline_config_path="${CONFIG_PATH}" \
+    --checkpoint_dir="${LOCAL_TRAIN}/${TRAIN_ID}/train" \
+    --eval_dir="${LOCAL_TRAIN}/${TRAIN_ID}/eval" &
+BACKGROUND_PROCESSES+=($!)
+
+
+# https://unix.stackexchange.com/questions/146756/forward-sigterm-to-child-in-bash
+# Kill background processes when killed by Docker (i.e. via the Batch console)
+# or when the last command exits.
+trap "_term" SIGINT SIGTERM EXIT 
 
 # monitor results using tensorboard app
-tensorboard --logdir=${LOCAL_TRAIN}/${TRAIN_ID}
-
-# kill child processes when this exits
-# https://stackoverflow.com/questions/360201/how-do-i-kill-background-processes-jobs-when-my-shell-script-exits
-trap "trap - SIGTERM && kill -- -$$" SIGINT SIGTERM EXIT
+tensorboard --logdir="${LOCAL_TRAIN}/${TRAIN_ID}"
